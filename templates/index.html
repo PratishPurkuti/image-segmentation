@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Instance Segmenter</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>Instance Segmenter</h1>
+            <p>Upload an image to extract individual objects with transparent backgrounds.</p>
+        </header>
+
+        <main>
+            <div id="drop-zone" class="drop-zone">
+                <span class="drop-zone__prompt">Drag & Drop image here or <span class="browse-link">Browse</span></span>
+                <input type="file" name="file" class="drop-zone__input" accept="image/png, image/jpeg, image/jpg">
+            </div>
+
+            <div id="error-message" class="error-message" style="display: none;"></div>
+
+            <div id="progress-container" class="progress-container" style="display: none;">
+                <div class="progress-bar">
+                    <div class="progress-bar__fill"></div>
+                </div>
+                <p>Processing image...</p>
+            </div>
+
+            <div id="results-section" class="results-section" style="display: none;">
+                <h2>Extracted Objects</h2>
+                <div class="results-actions">
+                    <a id="download-zip" href="#" class="btn btn-primary">Download All (ZIP)</a>
+                    <button id="reset-btn" class="btn btn-secondary">Start Over</button>
+                </div>
+                <div id="results-grid" class="results-grid">
+                    <!-- Thumbnails will be injected here -->
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        document.querySelectorAll(".drop-zone__input").forEach((inputElement) => {
+            const dropZoneElement = inputElement.closest(".drop-zone");
+
+            dropZoneElement.addEventListener("click", (e) => {
+                inputElement.click();
+            });
+
+            inputElement.addEventListener("change", (e) => {
+                if (inputElement.files.length) {
+                    handleFile(inputElement.files[0]);
+                }
+            });
+
+            dropZoneElement.addEventListener("dragover", (e) => {
+                e.preventDefault();
+                dropZoneElement.classList.add("drop-zone--over");
+            });
+
+            ["dragleave", "dragend"].forEach((type) => {
+                dropZoneElement.addEventListener(type, (e) => {
+                    dropZoneElement.classList.remove("drop-zone--over");
+                });
+            });
+
+            dropZoneElement.addEventListener("drop", (e) => {
+                e.preventDefault();
+
+                if (e.dataTransfer.files.length) {
+                    inputElement.files = e.dataTransfer.files;
+                    handleFile(e.dataTransfer.files[0]);
+                }
+
+                dropZoneElement.classList.remove("drop-zone--over");
+            });
+        });
+
+        function handleFile(file) {
+            const errorDiv = document.getElementById('error-message');
+            const progressContainer = document.getElementById('progress-container');
+            const resultsSection = document.getElementById('results-section');
+            const dropZone = document.getElementById('drop-zone');
+
+            // Reset UI
+            errorDiv.style.display = 'none';
+            resultsSection.style.display = 'none';
+            progressContainer.style.display = 'block';
+            dropZone.style.display = 'none'; // Hide drop zone while processing used to prevent re-upload during process
+
+            // Client-side validation
+            if (file.size > 10 * 1024 * 1024) {
+                showError("File size exceeds 10MB limit.");
+                progressContainer.style.display = 'none';
+                dropZone.style.display = 'flex';
+                return;
+            }
+
+            if (!['image/jpeg', 'image/png', 'image/jpg'].includes(file.type)) {
+                showError("Invalid file type. Only JPG and PNG are allowed.");
+                progressContainer.style.display = 'none';
+                dropZone.style.display = 'flex';
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            // Animate progress bar artificially since we don't have real progress updates from backend
+            const progressBar = document.querySelector('.progress-bar__fill');
+            progressBar.style.width = '0%';
+            let width = 0;
+            const interval = setInterval(() => {
+                if (width >= 90) clearInterval(interval);
+                width++;
+                progressBar.style.width = width + '%';
+            }, 50);
+
+            fetch('/upload', {
+                method: 'POST',
+                body: formData
+            })
+                .then(response => response.json())
+                .then(data => {
+                    clearInterval(interval);
+                    progressBar.style.width = '100%';
+
+                    if (data.error) {
+                        showError(data.error);
+                        progressContainer.style.display = 'none';
+                        dropZone.style.display = 'flex';
+                    } else {
+                        displayResults(data);
+                        progressContainer.style.display = 'none';
+                    }
+                })
+                .catch(error => {
+                    clearInterval(interval);
+                    showError("An error occurred during upload.");
+                    console.error(error);
+                    progressContainer.style.display = 'none';
+                    dropZone.style.display = 'flex';
+                });
+        }
+
+        function showError(msg) {
+            const errorDiv = document.getElementById('error-message');
+            errorDiv.textContent = msg;
+            errorDiv.style.display = 'block';
+        }
+
+        function displayResults(data) {
+            const resultsSection = document.getElementById('results-section');
+            const resultsGrid = document.getElementById('results-grid');
+            const downloadZip = document.getElementById('download-zip');
+            const dropZone = document.getElementById('drop-zone');
+
+            resultsGrid.innerHTML = '';
+
+            // Set ZIP link
+            downloadZip.href = `/download/${data.session_id}/${data.zip_file}`;
+
+            data.files.forEach(filename => {
+                const card = document.createElement('div');
+                card.className = 'result-card';
+
+                const img = document.createElement('img');
+                img.src = `/download/${data.session_id}/${filename}`;
+                img.alt = filename;
+
+                const downloadBtn = document.createElement('a');
+                downloadBtn.href = `/download/${data.session_id}/${filename}`;
+                downloadBtn.className = 'btn btn-sm';
+                downloadBtn.innerHTML = 'Download';
+                downloadBtn.download = filename; // Suggest filename
+
+                card.appendChild(img);
+                card.appendChild(downloadBtn);
+                resultsGrid.appendChild(card);
+            });
+
+            resultsSection.style.display = 'block';
+
+            // Handle Reset
+            document.getElementById('reset-btn').onclick = () => {
+                resultsSection.style.display = 'none';
+                dropZone.style.display = 'flex';
+                // Effectively keeping the file input cleared for new selection
+                document.querySelector('.drop-zone__input').value = '';
+            };
+        }
+    </script>
+</body>
+
+</html>
