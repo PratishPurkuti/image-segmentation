@@ -2,8 +2,12 @@ import os
 import tempfile
 import shutil
 import uuid
+import base64
+import io
 from flask import Flask, render_template, request, jsonify, send_file, after_this_request
 from werkzeug.utils import secure_filename
+from PIL import Image
+import numpy as np
 from utils.segmentation import segment_image, extract_objects, create_zip
 from dotenv import load_dotenv
 
@@ -99,6 +103,85 @@ def download_file_route(session_id, filename):
         return "File not found", 404
         
     return send_file(file_path, as_attachment=True)
+
+@app.route('/refine', methods=['POST'])
+def refine_segmentation():
+    """
+    Refine an existing segmented image by applying an erasure mask.
+    Expects JSON: {
+        'session_id': str,
+        'filename': str,
+        'mask': str (base64 encoded image of the erasure strokes)
+    }
+    """
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+        
+    session_id = data.get('session_id')
+    filename = data.get('filename')
+    mask_b64 = data.get('mask')
+    
+    if not all([session_id, filename, mask_b64]):
+        return jsonify({'error': 'Missing parameters'}), 400
+        
+    session_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'instance_seg_app', session_id)
+    file_path = os.path.join(session_dir, filename)
+    
+    if not os.path.exists(file_path):
+        return jsonify({'error': 'File not found'}), 404
+        
+    try:
+        # Decode the mask
+        if ',' in mask_b64:
+            mask_b64 = mask_b64.split(',')[1]
+        mask_bytes = base64.b64decode(mask_b64)
+        erasure_mask = Image.open(io.BytesIO(mask_bytes)).convert("L")
+        
+        # Load the original image
+        original = Image.open(file_path).convert("RGBA")
+        
+        # Resize erasure mask to match image if needed
+        if erasure_mask.size != original.size:
+            erasure_mask = erasure_mask.resize(original.size, Image.NEAREST)
+            
+        # Apply the erasure
+        # Where the mask is white (drawn), we want to make the image transparent.
+        # We can do this by updating the alpha channel.
+        
+        r, g, b, a = original.split()
+        
+        # Invert the erasure mask (0=keep, 255=erase) -> we want 0=erase, 255=keep for composition?
+        # Actually easier: new_alpha = old_alpha - erasure_value
+        # If erasure is white (255), we want alpha to become 0.
+        # If erasure is black (0), we want alpha to stay same.
+        
+        # Convert images to numpy for easy math
+        import numpy as np
+        a_arr = np.array(a)
+        mask_arr = np.array(erasure_mask)
+        
+        # If mask is > 0, set alpha to 0. 
+        # (Assuming the frontend sends a black canvas with white strokes for erasure)
+        a_arr = np.where(mask_arr > 10, 0, a_arr)
+        
+        new_a = Image.fromarray(a_arr.astype('uint8'))
+        original.putalpha(new_a)
+        
+        # Save back
+        original.save(file_path, format="PNG")
+        
+        # Re-create ZIP to include updated file
+        # Find all png files in the directory
+        all_files = [os.path.join(session_dir, f) for f in os.listdir(session_dir) if f.endswith('.png') and 'mask' not in f]
+        zip_filename = f"objects_{session_id}.zip"
+        zip_path = os.path.join(session_dir, zip_filename)
+        create_zip(all_files, zip_path)
+        
+        return jsonify({'status': 'success', 'filename': filename})
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/cleanup/<session_id>', methods=['POST'])
 def cleanup_session(session_id):

@@ -44,7 +44,52 @@
         </main>
     </div>
 
+    <!-- Editor Modal -->
+    <div id="editor-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Refine Segmentation</h2>
+            </div>
+            <div class="editor-workspace">
+                <canvas id="editor-canvas"></canvas>
+            </div>
+            <div class="editor-toolbar">
+                <div class="tool-group">
+                    <span class="tool-label">Brush Size:</span>
+                    <input type="range" id="brush-size" min="5" max="100" value="20">
+                </div>
+                <div class="tool-group">
+                    <button id="undo-btn" class="btn btn-sm btn-secondary" title="Undo">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <path d="M9 14L4 9l5-5"></path>
+                            <path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5v0a5.5 5.5 0 0 1-5.5 5.5H11"></path>
+                        </svg>
+                    </button>
+                    <button id="redo-btn" class="btn btn-sm btn-secondary" title="Redo">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <path d="M15 14l5-5-5-5"></path>
+                            <path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5v0A5.5 5.5 0 0 0 9.5 20H13"></path>
+                        </svg>
+                    </button>
+                </div>
+                <div class="tool-group">
+                    <button id="cancel-edit" class="btn btn-secondary">Cancel</button>
+                    <button id="save-edit" class="btn btn-primary">Save Changes</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Load Editor Script -->
+    <script src="{{ url_for('static', filename='editor.js') }}"></script>
+
     <script>
+        let currentSessionId = null;
+        let currentEditor = null;
+        let currentEditingFile = null;
+
         document.querySelectorAll(".drop-zone__input").forEach((inputElement) => {
             const dropZoneElement = inputElement.closest(".drop-zone");
 
@@ -135,6 +180,7 @@
                         progressContainer.style.display = 'none';
                         dropZone.style.display = 'flex';
                     } else {
+                        currentSessionId = data.session_id; // Store session ID
                         displayResults(data);
                         progressContainer.style.display = 'none';
                     }
@@ -170,17 +216,32 @@
                 card.className = 'result-card';
 
                 const img = document.createElement('img');
-                img.src = `/download/${data.session_id}/${filename}`;
+                const imgUrl = `/download/${data.session_id}/${filename}?t=${new Date().getTime()}`; // Add timestamp to bust cache
+                img.src = imgUrl;
                 img.alt = filename;
+
+                const actionsDiv = document.createElement('div');
+                actionsDiv.style.display = 'flex';
+                actionsDiv.style.gap = '0.5rem';
 
                 const downloadBtn = document.createElement('a');
                 downloadBtn.href = `/download/${data.session_id}/${filename}`;
                 downloadBtn.className = 'btn btn-sm';
                 downloadBtn.innerHTML = 'Download';
                 downloadBtn.download = filename; // Suggest filename
+                downloadBtn.style.flex = '1';
+
+                const editBtn = document.createElement('button');
+                editBtn.className = 'btn btn-sm btn-secondary';
+                editBtn.innerHTML = 'Edit';
+                editBtn.style.flex = '1';
+                editBtn.onclick = () => openEditor(filename);
+
+                actionsDiv.appendChild(downloadBtn);
+                actionsDiv.appendChild(editBtn);
 
                 card.appendChild(img);
-                card.appendChild(downloadBtn);
+                card.appendChild(actionsDiv);
                 resultsGrid.appendChild(card);
             });
 
@@ -192,8 +253,92 @@
                 dropZone.style.display = 'flex';
                 // Effectively keeping the file input cleared for new selection
                 document.querySelector('.drop-zone__input').value = '';
+                currentSessionId = null;
             };
         }
+
+        // --- Editor Logic ---
+
+        function openEditor(filename) {
+            currentEditingFile = filename;
+            const modal = document.getElementById('editor-modal');
+            const imgUrl = `/download/${currentSessionId}/${filename}?t=${new Date().getTime()}`;
+
+            modal.style.display = 'flex';
+
+            if (!currentEditor) {
+                currentEditor = new ImageEditor('editor-canvas');
+
+                document.getElementById('brush-size').addEventListener('input', (e) => {
+                    currentEditor.setBrushSize(parseInt(e.target.value));
+                });
+
+                document.getElementById('undo-btn').onclick = () => currentEditor.undo();
+                document.getElementById('redo-btn').onclick = () => currentEditor.redo();
+
+                document.getElementById('cancel-edit').onclick = closeEditor;
+                document.getElementById('save-edit').onclick = saveEdit;
+            }
+
+            currentEditor.loadImage(imgUrl);
+        }
+
+        function closeEditor() {
+            document.getElementById('editor-modal').style.display = 'none';
+            currentEditingFile = null;
+        }
+
+        function saveEdit() {
+            const maskData = currentEditor.getMask();
+            const saveBtn = document.getElementById('save-edit');
+            const originalText = saveBtn.innerText;
+            saveBtn.innerText = "Saving...";
+            saveBtn.disabled = true;
+
+            fetch('/refine', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    session_id: currentSessionId,
+                    filename: currentEditingFile,
+                    mask: maskData
+                })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    saveBtn.innerText = originalText;
+                    saveBtn.disabled = false;
+
+                    if (data.status === 'success') {
+                        closeEditor();
+                        // Refresh the specific image in the grid
+                        updateImageInGrid(data.filename);
+                    } else {
+                        alert('Error saving: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(err => {
+                    saveBtn.innerText = originalText;
+                    saveBtn.disabled = false;
+                    alert('Error saving: ' + err);
+                });
+        }
+
+        function updateImageInGrid(filename) {
+            // Find the image element with this filename
+            const imgs = document.querySelectorAll('.result-card img');
+            imgs.forEach(img => {
+                if (img.alt === filename) {
+                    // Update src with timestamp to force reload
+                    img.src = `/download/${currentSessionId}/${filename}?t=${new Date().getTime()}`;
+                }
+            });
+
+            // Also update the download link logic if needed (it points to same URL so it should be fine)
+        }
+
     </script>
 </body>
 

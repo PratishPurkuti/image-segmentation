@@ -112,15 +112,29 @@ def extract_objects(image_path, segmentation_results, output_dir):
         mask_image = mask_image.convert("L")
         
         # Resize mask to match original image if needed
+        # Use LANCZOS for high-quality downsampling/upsampling logic to avoid jagged edges
         if mask_image.size != original_image.size:
-            mask_image = mask_image.resize(original_image.size, Image.NEAREST)
+            mask_image = mask_image.resize(original_image.size, Image.LANCZOS)
         
-        # Create a blank image with the same size
-        # mask_image is white (255) for the object and black (0) for background?
-        # We need to check use the mask to filter the original image.
+        # Clean up the mask: Threshold to remove faint background noise but keep anti-aliasing
+        # This helps "just the object" be masked out by removing low-confidence pixels
+        mask_arr = np.array(mask_image)
+        # Binarize slightly to remove halo? Or just keep it soft?
+        # User said "accuracy is low", implying bad edges.
+        # Let's keep it soft but clamp the bottom range to clear background.
         
+        # Simple thresholding to remove noise (anything < 10/255 becomes 0)
+        # But keep the upper range soft for anti-aliasing
+        mask_arr = np.where(mask_arr < 10, 0, mask_arr)
+        mask_image = Image.fromarray(mask_arr)
+
         # Create composite: apply mask to alpha channel
         object_img = original_image.copy()
+        
+        # Ensure mask is L mode (8-bit pixels, black and white)
+        if mask_image.mode != 'L':
+             mask_image = mask_image.convert('L')
+             
         object_img.putalpha(mask_image)
         
         # Crop to bounding box of the non-transparent area
